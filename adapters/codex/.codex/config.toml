@@ -1,0 +1,14 @@
+# Codex adapter (optional; installed with --with-codex). AGENTS.md is read natively; this file sets
+# the compaction point and turns on the lifecycle hooks in hooks.json. Codex loads a project-level
+# .codex/config.toml only for trusted projects.
+
+# Compact at ~200k tokens: everything that must survive lives on disk (the task record), so an
+# earlier compaction is cheap, and ~200k is the measured cost-effective point for this structure.
+# (A top-level key: it must stay above the first [table].)
+model_auto_compact_token_limit = 200000
+
+# Hooks are experimental in Codex: the flag was renamed from `codex_hooks` to `hooks`, and some
+# versions ignore repo-local hook config in interactive sessions — if the hook doesn't fire, set the
+# same flag in ~/.codex/config.toml.
+[features]
+hooks = true

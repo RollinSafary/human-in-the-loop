@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.agent/hooks/context-first.sh\" --format text --event SessionStart",
+            "statusMessage": "Loading saved contexts…",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.agent/hooks/context-first.sh\" --format text",
+            "statusMessage": "Looking for a relevant saved context…",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

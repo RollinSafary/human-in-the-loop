@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Potential overlap between this worktree's task and the tasks in every other worktree
+# (protocol: .agent/contexts/tools/concurrent-work.md).
+#
+# A task's footprint is what it changed (committed since the merge base with <base>, staged,
+# unstaged, untracked) plus what its record declares in `Affects:` (backticked path globs). For each
+# other worktree this prints its branch, Goal/Now/Affects, and:
+#   files     files changed in both worktrees
+#   declared  files inside one task's declared footprint that the other changed or also declared
+# Everything reported is *potential*; deciding whether it is a real file-level, architectural or
+# behavioural conflict is the agent's job, and a confirmed one is a decision for the human.
+#
+# Usage: worktree-overlap [--base <ref>]
+# Exit:  0 always (a report, not a gate) · 2 setup error
+
+set -u
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=../lib/common.sh
+. "$script_dir/../lib/common.sh" || exit 2
+
+base=""
+base_given=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --base) base=${2:-}; base_given=1; shift 2 ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) shift ;;
+  esac
+done
+
+root=$(agent_root "$script_dir")
+git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || { echo "worktree-overlap: not a git repo" >&2; exit 2; }
+[ "$base_given" -eq 1 ] || base=$(base_ref "$root")
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/worktree-overlap.XXXXXX") || exit 2
+trap 'rm -rf "$tmp"' EXIT
+
+# footprint <worktree> <branch> <prefix> — writes <prefix>.changed, <prefix>.declared and
+# <prefix>.record (first record path, may be empty).
+footprint() {
+  local wt=$1 branch=$2 out=$3 rec
+  changed_files "$wt" "$base" > "$out.changed"
+  rec=$(task_records "$wt" "$branch" | head -n 1)
+  printf '%s\n' "$rec" > "$out.record"
+  : > "$out.declared"
+  [ -n "$rec" ] || return 0
+  record_field "$wt/$rec" Affects | backticked_globs > "$out.globs"
+  while IFS= read -r g; do
+    [ -n "$g" ] && expand_globs "$wt" "$g"
+  done < "$out.globs" | sort -u > "$out.declared"
+}
+
+me_branch=$(current_branch "$root")
+footprint "$root" "$me_branch" "$tmp/me"
+me_record=$(cat "$tmp/me.record")
+
+printf 'worktree-overlap: this task %s · base %s · %d changed, %d declared%s\n' \
+  "${me_branch:-<detached>}" "${base:-<none>}" \
+  "$(grep -c . "$tmp/me.changed" || true)" "$(grep -c . "$tmp/me.declared" || true)" \
+  "$([ -z "$me_record" ] && printf ' · no task record (no Affects: footprint)')"
+
+n_other=0
+n_overlap=0
+other_worktrees "$root" > "$tmp/others"
+while IFS="$(printf '\t')" read -r wt branch; do
+  [ -n "$wt" ] || continue
+  [ -d "$wt" ] || continue
+  n_other=$((n_other + 1))
+  footprint "$wt" "$branch" "$tmp/them"
+  rec=$(cat "$tmp/them.record")
+
+  files=$(comm -12 "$tmp/me.changed" "$tmp/them.changed" | join_list 8)
+  declared=$( {
+      comm -12 "$tmp/me.changed" "$tmp/them.declared"
+      comm -12 "$tmp/them.changed" "$tmp/me.declared"
+      comm -12 "$tmp/me.declared" "$tmp/them.declared"
+    } | sort -u | join_list 8)
+
+  printf '\n%s  (%s)\n' "${branch:-<detached>}" "$wt"
+  if [ -n "$rec" ]; then
+    printf '  record:   %s\n' "$rec"
+    for f in Goal Now Affects; do
+      v=$(record_field "$wt/$rec" "$f")
+      [ -n "$v" ] && printf '  %-9s %s\n' "$(printf '%s' "$f" | tr 'A-Z' 'a-z'):" "$v"
+    done
+  else
+    printf '  record:   none — footprint is only what it changed (%d files)\n' \
+      "$(grep -c . "$tmp/them.changed" || true)"
+  fi
+  if [ -n "$files$declared" ]; then
+    n_overlap=$((n_overlap + 1))
+    [ -n "$files" ] && printf '  files:    %s\n' "$files"
+    [ -n "$declared" ] && printf '  declared: %s\n' "$declared"
+  else
+    printf '  overlap:  none\n'
+  fi
+done < "$tmp/others"
+
+if [ "$n_other" -eq 0 ]; then
+  printf 'No other worktrees.\n'
+else
+  printf '\n%d other worktree(s); potential overlap with %d. Assess per .agent/contexts/tools/concurrent-work.md.\n' \
+    "$n_other" "$n_overlap"
+fi
+exit 0

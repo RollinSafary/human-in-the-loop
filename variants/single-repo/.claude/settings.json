@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "includeCoAuthoredBy": false,
+  "showThinkingSummaries": true,
+  "autoContinueAtUsageLimit": true,
+  "autoCompactEnabled": true,
+  "autoCompactWindow": 200000,
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+      "Bash(.agent/hooks/context-first.sh *)",
+      "Bash(.agent/bin/check-contexts *)",
+      "Bash(.agent/bin/worktree-overlap *)",
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(npm ci *)",
+      "Bash(npm ls *)",
+      "Bash(npm exec *)",
+      "Bash(npm install)",
+      "Bash(tsc *)",
+      "Bash(eslint *)",
+      "Bash(prettier *)",
+      "Bash(cspell *)",
+      "Bash(vitest *)",
+      "Bash(jest *)",
+      "Bash(playwright test *)",
+      "Bash(npx tsc *)",
+      "Bash(npx eslint *)",
+      "Bash(npx prettier *)",
+      "Bash(npx vitest *)",
+      "Bash(npx playwright test *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git fetch *)",
+      "Bash(git blame *)",
+      "Bash(git grep *)",
+      "Bash(git ls-files *)",
+      "Bash(git rev-parse *)",
+      "Bash(git merge-base *)",
+      "Bash(git symbolic-ref *)",
+      "Bash(git describe *)",
+      "Bash(git cat-file *)",
+      "Bash(git stash list *)",
+      "Bash(git worktree list *)",
+      "Bash(git remote -v)",
+      "Bash(git remote show *)",
+      "Bash(git remote get-url *)",
+      "Bash(git tag --list *)",
+      "Bash(git tag -l *)",
+      "Bash(git config --get *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh issue list *)",
+      "Bash(gh issue view *)",
+      "Bash(gh repo view *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(wc *)",
+      "Bash(which *)",
+      "Bash(pwd)",
+      "Bash(mkdir *)",
+      "Bash(touch *)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(git branch -d *)",
+      "Bash(git branch -D *)",
+      "Bash(git branch --delete *)",
+      "Bash(git branch -m *)",
+      "Bash(git branch -M *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean *)",
+      "Bash(git worktree remove *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
+      "Bash(npm install *)",
+      "Bash(npm uninstall *)",
+      "Bash(npm update *)"
+    ],
+    "deny": [
+      "Bash(npm publish *)",
+      "Bash(npm * publish *)",
+      "Bash(npm version *)",
+      "Bash(npm run release*)",
+      "Bash(npx * publish *)",
+      "Bash(changeset publish *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f *)",
+      "Bash(git tag -d *)",
+      "Bash(git tag --delete *)",
+      "Bash(git remote add *)",
+      "Bash(git remote remove *)",
+      "Bash(git remote rm *)",
+      "Bash(git remote set-url *)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/context-first.sh\" --format json --event UserPromptSubmit",
+            "statusMessage": "Looking for a relevant saved context…"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/context-first.sh\" --format json --event SessionStart --source compact",
+            "statusMessage": "Restoring task record after compaction…"
+          }
+        ]
+      }
+    ]
+  }
+}

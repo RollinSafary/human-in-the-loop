@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "attribution": { "commit": "", "pr": "" },
+  "includeCoAuthoredBy": false,
+  "showThinkingSummaries": true,
+  "autoContinueAtUsageLimit": true,
+  "autoCompactEnabled": true,
+  "autoCompactWindow": 200000,
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+
+      "Bash(.agent/hooks/context-first.sh *)",
+      "Bash(.agent/bin/check-contexts *)",
+      "Bash(.agent/bin/worktree-overlap *)",
+
+      "Bash(pnpm *)",
+      "Bash(corepack *)",
+      "Bash(lerna run *)",
+      "Bash(lerna list *)",
+      "Bash(lerna ls *)",
+      "Bash(lerna changed *)",
+      "Bash(lerna diff *)",
+      "Bash(tsc *)",
+      "Bash(eslint *)",
+      "Bash(prettier *)",
+      "Bash(cspell *)",
+      "Bash(vitest *)",
+      "Bash(jest *)",
+      "Bash(playwright test *)",
+      "Bash(npx tsc *)",
+      "Bash(npx eslint *)",
+      "Bash(npx prettier *)",
+      "Bash(npx vitest *)",
+      "Bash(npx playwright test *)",
+
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git fetch *)",
+      "Bash(git blame *)",
+      "Bash(git grep *)",
+      "Bash(git ls-files *)",
+      "Bash(git rev-parse *)",
+      "Bash(git merge-base *)",
+      "Bash(git symbolic-ref *)",
+      "Bash(git describe *)",
+      "Bash(git cat-file *)",
+      "Bash(git stash list *)",
+      "Bash(git worktree list *)",
+      "Bash(git remote -v)",
+      "Bash(git remote show *)",
+      "Bash(git remote get-url *)",
+      "Bash(git tag --list *)",
+      "Bash(git tag -l *)",
+      "Bash(git config --get *)",
+
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh issue list *)",
+      "Bash(gh issue view *)",
+      "Bash(gh repo view *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(wc *)",
+      "Bash(which *)",
+      "Bash(pwd)",
+      "Bash(mkdir *)",
+      "Bash(touch *)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(git branch -d *)",
+      "Bash(git branch -D *)",
+      "Bash(git branch --delete *)",
+      "Bash(git branch -m *)",
+      "Bash(git branch -M *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean *)",
+      "Bash(git worktree remove *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
+      "Bash(pnpm add *)",
+      "Bash(pnpm remove *)",
+      "Bash(pnpm update *)",
+      "Bash(pnpm dlx *)"
+    ],
+    "deny": [
+      "Bash(pnpm publish *)",
+      "Bash(pnpm * publish)",
+      "Bash(pnpm * publish *)",
+      "Bash(pnpm release*)",
+      "Bash(pnpm run release*)",
+      "Bash(npm publish *)",
+      "Bash(npx * publish *)",
+      "Bash(lerna publish *)",
+      "Bash(lerna version *)",
+      "Bash(changeset publish *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f *)",
+      "Bash(git tag -d *)",
+      "Bash(git tag --delete *)",
+      "Bash(git remote add *)",
+      "Bash(git remote remove *)",
+      "Bash(git remote rm *)",
+      "Bash(git remote set-url *)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/context-first.sh\" --format json --event UserPromptSubmit",
+            "statusMessage": "Looking for a relevant saved context…"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/context-first.sh\" --format json --event SessionStart --source compact",
+            "statusMessage": "Restoring task record after compaction…"
+          }
+        ]
+      }
+    ]
+  }
+}

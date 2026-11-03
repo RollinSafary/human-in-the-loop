@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# Drift report for the saved contexts (.agent/contexts/, protocol: tools/context-updater.md).
+#
+# For every context doc outside tools/ (or the docs given as arguments) it checks:
+#   - each `path:line` reference: the file exists, the line exists, and the backticked symbol that
+#     follows it on the same line is on that line — if the symbol moved, where it is now;
+#   - each `Covers:` glob still matches at least one file.
+# Then it splits docs into "relevant to this change" (their Covers globs or referenced files include
+# a file this worktree changed since <base>) and "unrelated". A relevant doc with no findings is
+# still listed: references prove locations, not meaning, so its content needs a read.
+#
+# Usage: check-contexts [--base <ref>] [doc.md ...]
+# Exit:  0 no findings · 1 findings · 2 usage/setup error
+#
+# Finding kinds:
+#   DRIFT       the symbol moved; the reference needs its line refreshed (mechanical)
+#   BROKEN      the line no longer exists and no symbol anchors it
+#   GONE        the anchoring symbol is no longer in the file
+#   MISSING     the referenced file does not exist
+#   UNANCHORED  the reference names no symbol, so it cannot be verified
+#   EMPTY-COVER a Covers glob matches no file
+
+set -u
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=../lib/common.sh
+. "$script_dir/../lib/common.sh" || exit 2
+
+base=""
+base_given=0
+docs=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --base) base=${2:-}; base_given=1; shift 2 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) docs+=("$1"); shift ;;
+  esac
+done
+
+root=$(agent_root "$script_dir")
+cd "$root" || exit 2
+[ -d .agent/contexts ] || { echo "check-contexts: no .agent/contexts in $root" >&2; exit 2; }
+[ "$base_given" -eq 1 ] || base=$(base_ref "$root")
+
+# "${docs[@]+"${docs[@]}"}" below: bash 3.2 treats an empty array as unset under `set -u`.
+if [ "${#docs[@]}" -eq 0 ]; then
+  while IFS= read -r d; do
+    [ -n "$d" ] && docs+=("$d")
+  done <<EOF
+$(find .agent/contexts -type f -name '*.md' ! -path '.agent/contexts/tools/*' | sort)
+EOF
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/check-contexts.XXXXXX") || exit 2
+trap 'rm -rf "$tmp"' EXIT
+changed_files "$root" "$base" > "$tmp/changed"
+n_changed=$(grep -c . "$tmp/changed" || true)
+
+# refs <doc> — "<doc line>\t<path>\t<start>\t<end>\t<symbol>" per reference, skipping fenced code.
+refs() {
+  awk '
+    /^[ \t]*```/ { fence = !fence; next }
+    fence { next }
+    {
+      n = 0; s = $0
+      while ((i = index(s, "`")) > 0) {
+        s = substr(s, i + 1); j = index(s, "`"); if (j == 0) break
+        tok[++n] = substr(s, 1, j - 1); s = substr(s, j + 1)
+      }
+      for (k = 1; k <= n; k++) {
+        t = tok[k]
+        if (t !~ /^[A-Za-z0-9_.\/@+-]+:[0-9]+(-[0-9]+)?$/) continue
+        c = index(t, ":"); path = substr(t, 1, c - 1); range = substr(t, c + 1)
+        if (path !~ /[\/.]/ || path ~ /^[0-9.]+$/ || path ~ /^https?$/) continue
+        d = index(range, "-")
+        if (d) { start = substr(range, 1, d - 1); stop = substr(range, d + 1) } else { start = range; stop = range }
+        sym = ""
+        if (k < n && tok[k + 1] ~ /^[A-Za-z_$#][A-Za-z0-9_$#.:]*(\(\))?$/ && tok[k + 1] !~ /:[0-9]+$/) {
+          sym = tok[k + 1]; sub(/\(\)$/, "", sym)
+          m = split(sym, part, /[.#]|::/); sym = part[m]
+        }
+        printf "%d\t%s\t%s\t%s\t%s\n", NR, path, start, stop, sym
+      }
+    }
+  ' "$1"
+}
+
+# check_ref <path> <start> <end> <symbol> — prints "KIND\tdetail" or nothing when the ref holds.
+check_ref() {
+  local path=$1 start=$2 stop=$3 sym=$4 total found
+  if [ ! -f "$path" ]; then
+    printf 'MISSING\tfile not found\n'
+    return
+  fi
+  total=$(awk 'END { print NR }' "$path")
+  if [ -z "$sym" ]; then
+    if [ "$stop" -gt "$total" ]; then
+      printf 'BROKEN\tfile has %s lines; no symbol to re-anchor\n' "$total"
+    else
+      printf 'UNANCHORED\tno symbol after the reference\n'
+    fi
+    return
+  fi
+  if [ "$start" -le "$total" ] &&
+     awk -v a="$start" -v b="$stop" 'NR >= a && NR <= b' "$path" | grep -qwF -- "$sym"; then
+    return
+  fi
+  found=$(grep -nwF -- "$sym" "$path" | cut -d: -f1 | join_list 3)
+  if [ -n "$found" ]; then
+    printf 'DRIFT\t`%s` now at line %s\n' "$sym" "$found"
+  else
+    printf 'GONE\t`%s` no longer in the file\n' "$sym"
+  fi
+}
+
+findings=0
+: > "$tmp/relevant"
+: > "$tmp/unrelated"
+
+for doc in ${docs[@]+"${docs[@]}"}; do
+  [ -f "$doc" ] || { echo "check-contexts: not a file: $doc" >&2; continue; }
+  report=""
+  touched=""
+
+  : > "$tmp/covered"
+  grep -m1 '^Covers:' "$doc" | backticked_globs > "$tmp/globs"
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    expand_globs "$root" "$g" > "$tmp/glob-files"
+    if [ -s "$tmp/glob-files" ]; then
+      cat "$tmp/glob-files" >> "$tmp/covered"
+    else
+      report="$report    EMPTY-COVER  \`$g\` matches no file"$'\n'
+    fi
+  done < "$tmp/globs"
+
+  refs "$doc" > "$tmp/refs"
+  while IFS="$(printf '\t')" read -r line path start stop sym; do
+    [ -n "$path" ] || continue
+    printf '%s\n' "$path" >> "$tmp/covered"
+    result=$(check_ref "$path" "$start" "$stop" "$sym")
+    [ -n "$result" ] || continue
+    kind=${result%%"$(printf '\t')"*}
+    detail=${result#*"$(printf '\t')"}
+    report="$report$(printf '    %-11s  L%-4s %s:%s — %s' "$kind" "$line" "$path" "$start" "$detail")"$'\n'
+  done < "$tmp/refs"
+
+  [ -n "$report" ] && findings=$((findings + 1))
+  if [ -s "$tmp/changed" ]; then
+    touched=$(sort -u "$tmp/covered" | comm -12 - "$tmp/changed" | join_list 4)
+  fi
+
+  if [ -n "$touched" ]; then
+    {
+      printf '  %s  (covers changed: %s)\n' "$doc" "$touched"
+      if [ -n "$report" ]; then
+        printf '%s' "$report"
+      else
+        printf '    references hold — content still needs a read against the change\n'
+      fi
+    } >> "$tmp/relevant"
+  elif [ -n "$report" ]; then
+    printf '  %s\n%s' "$doc" "$report" >> "$tmp/unrelated"
+  fi
+done
+
+printf 'check-contexts: %d docs checked · base %s · %d files changed in this worktree\n' \
+  "${#docs[@]}" "${base:-<none>}" "$n_changed"
+if [ -s "$tmp/relevant" ]; then
+  printf '\nRelevant to this change\n'
+  cat "$tmp/relevant"
+fi
+if [ -s "$tmp/unrelated" ]; then
+  printf '\nUnrelated (pre-existing drift)\n'
+  cat "$tmp/unrelated"
+fi
+if [ "$findings" -eq 0 ] && [ ! -s "$tmp/relevant" ]; then
+  printf 'No drift.\n'
+fi
+[ "$findings" -eq 0 ]
