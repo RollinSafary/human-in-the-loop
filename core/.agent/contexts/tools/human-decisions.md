@@ -14,7 +14,7 @@ assumption.
 | **Conflicting evidence about intent** | code, comments, docs, ADRs and callers disagree about what something is supposed to do ([evidence-conflicts.md](evidence-conflicts.md)) |
 | **Scope change** | the task as stated can't be done as stated, or doing it right needs work outside it |
 | **The shared record** | landing or abandoning an ADR step, an `ISSUES.md` entry leaving by acceptance, fixing unrelated context drift |
-| **Another task in flight** | a confirmed conflict with a task in another worktree ([concurrent-work.md](concurrent-work.md)) |
+| **Another task in flight** | a possible collision — ignore, quick look, or full investigation — and then a confirmed one ([concurrent-work.md](concurrent-work.md)) |
 | **Outside actions** | push, open PRs, publish, release, delete branches/tags, anything visible to others — unless asked for in this task |
 | **Disagreeing with review** | a self-review finding the implementer believes is wrong |
 

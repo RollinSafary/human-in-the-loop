@@ -1,17 +1,32 @@
 #!/usr/bin/env bash
-# Potential overlap between this worktree's task and the tasks in every other worktree
+# Collisions between this worktree's task and every other task in flight
 # (protocol: .agent/contexts/tools/concurrent-work.md).
 #
-# A task's footprint is what it changed (committed since the merge base with <base>, staged,
-# unstaged, untracked) plus what its record declares in `Affects:` (backticked path globs). For each
-# other worktree this prints its branch, Goal/Now/Affects, and:
-#   files     files changed in both worktrees
-#   declared  files inside one task's declared footprint that the other changed or also declared
-# Everything reported is *potential*; deciding whether it is a real file-level, architectural or
-# behavioural conflict is the agent's job, and a confirmed one is a decision for the human.
+# Usage:
+#   worktree-overlap [--base <ref>] [--no-fetch]    detect: the full report
+#   worktree-overlap --brief                        one line per undecided collision (hooks use this)
+#   worktree-overlap ignore <branch|main> [--path <file>]...
+#                                                   record the user's choice to ignore it as it is now
+#                                                   (plus any files named, before they are touched)
+#   worktree-overlap quick  <branch|main>           quick look: their goal + overlapping changes, to a file
+#   worktree-overlap full   <branch|main> [--test "<command>"]
+#                                                   full investigation: merge both in a throwaway
+#                                                   worktree and run <command> on the result
 #
-# Usage: worktree-overlap [--base <ref>]
-# Exit:  0 always (a report, not a gate) · 2 setup error
+# Detection compares this task with every other worktree, and with the base branch ("main") when it
+# moved since this branch left it. Signals, all mechanical:
+#   both change  files changed on both sides (committed since the merge base, staged, unstaged, untracked)
+#   declared     files one side changed or declared in `Affects:` that lie in the other's declared footprint
+#   uses         files one side changed that use a symbol the other side changed (heuristic)
+#   merge        textual conflicts if the two committed states merged (git merge-tree; git >= 2.38)
+# Every hit is a *possible* collision. The user decides what happens next: ignore, quick look, or
+# full investigation. An ignored collision stays quiet until it grows: a file, a symbol use or a
+# textual conflict that the ignore did not cover.
+#
+# Results are cached under .tmp/.collisions/ and recomputed only when a worktree, a task record or
+# the base moved, so hooks can call --brief on every prompt.
+#
+# Exit: 0 (a report, not a gate) · 2 setup or usage error
 
 set -u
 
@@ -19,88 +34,402 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=../lib/common.sh
 . "$script_dir/../lib/common.sh" || exit 2
 
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
+
+cmd=detect
+subject=""
 base=""
 base_given=0
+fetch=1
+test_cmd=""
+paths_given=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --base) base=${2:-}; base_given=1; shift 2 ;;
-    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) shift ;;
+    --brief)    cmd=brief ;;
+    --base)     base=${2:-}; base_given=1; shift ;;
+    --no-fetch) fetch=0 ;;
+    --test)     test_cmd=${2:-}; shift ;;
+    --path)     paths_given="$paths_given${2:-}"$'\n'; shift ;;
+    -h|--help)  usage; exit 0 ;;
+    ignore|quick|full)
+      [ "$cmd" = detect ] || { usage >&2; exit 2; }
+      cmd=$1; subject=${2:-}; shift
+      [ -n "$subject" ] || { echo "worktree-overlap: $cmd needs a branch (or main)" >&2; exit 2; } ;;
+    *) echo "worktree-overlap: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
   esac
+  shift
 done
 
 root=$(agent_root "$script_dir")
 git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || { echo "worktree-overlap: not a git repo" >&2; exit 2; }
 [ "$base_given" -eq 1 ] || base=$(base_ref "$root")
-
+me_branch=$(current_branch "$root")
+state="$root/.tmp/.collisions"
+mkdir -p "$state"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/worktree-overlap.XXXXXX") || exit 2
 trap 'rm -rf "$tmp"' EXIT
+TAB=$(printf '\t')
+# Report fields are joined by the ASCII unit separator, not a tab: bash's `read` collapses runs of
+# whitespace separators, which would shift every field after an empty one.
+US=$(printf '\037')
 
-# footprint <worktree> <branch> <prefix> — writes <prefix>.changed, <prefix>.declared and
-# <prefix>.record (first record path, may be empty).
+# --- footprints -----------------------------------------------------------------------------------
+
+# footprint <worktree> <branch> <prefix> — <prefix>.changed/.declared/.symbols/.record for a task.
 footprint() {
   local wt=$1 branch=$2 out=$3 rec
   changed_files "$wt" "$base" > "$out.changed"
   rec=$(task_records "$wt" "$branch" | head -n 1)
   printf '%s\n' "$rec" > "$out.record"
   : > "$out.declared"
-  [ -n "$rec" ] || return 0
-  record_field "$wt/$rec" Affects | backticked_globs > "$out.globs"
-  while IFS= read -r g; do
-    [ -n "$g" ] && expand_globs "$wt" "$g"
-  done < "$out.globs" | sort -u > "$out.declared"
+  if [ -n "$rec" ]; then
+    record_field "$wt/$rec" Affects | backticked_globs > "$out.globs"
+    while IFS= read -r g; do
+      [ -n "$g" ] && expand_globs "$wt" "$g"
+    done < "$out.globs" | sort -u > "$out.declared"
+  fi
+  changed_symbols "$wt" "$base" > "$out.symbols"
 }
 
-me_branch=$(current_branch "$root")
-footprint "$root" "$me_branch" "$tmp/me"
-me_record=$(cat "$tmp/me.record")
+# base_footprint <prefix> — what the base branch changed since this branch left it.
+base_footprint() {
+  local out=$1 mb
+  : > "$out.changed"; : > "$out.declared"; : > "$out.symbols"; : > "$out.record"
+  mb=$(git -C "$root" merge-base HEAD "$base" 2>/dev/null) || return 0
+  git -C "$root" diff --name-only "$mb" "$base" -- 2>/dev/null | sort -u > "$out.changed"
+  git -C "$root" diff -U0 --no-color "$mb" "$base" -- 2>/dev/null | symbols_from_diff > "$out.symbols"
+}
 
-printf 'worktree-overlap: this task %s · base %s · %d changed, %d declared%s\n' \
-  "${me_branch:-<detached>}" "${base:-<none>}" \
-  "$(grep -c . "$tmp/me.changed" || true)" "$(grep -c . "$tmp/me.declared" || true)" \
-  "$([ -z "$me_record" ] && printf ' · no task record (no Affects: footprint)')"
+csv() { paste -sd, - | sed 's/,/, /g'; }
 
-n_other=0
-n_overlap=0
-other_worktrees "$root" > "$tmp/others"
-while IFS="$(printf '\t')" read -r wt branch; do
-  [ -n "$wt" ] || continue
-  [ -d "$wt" ] || continue
-  n_other=$((n_other + 1))
-  footprint "$wt" "$branch" "$tmp/them"
-  rec=$(cat "$tmp/them.record")
+# compare <name> <label> <worktree> <their-commit> <prefix> — one TSV line in $tmp/report when the
+# two footprints touch: name, label, worktree, signature, both, declared, uses, merge.
+compare() {
+  local name=$1 label=$2 wt=$3 theirs=$4 p=$5 both declared uses merge sig conflicts rc
+  comm -12 "$tmp/me.changed" "$p.changed" > "$tmp/both"
+  { comm -12 "$tmp/me.changed" "$p.declared"
+    comm -12 "$p.changed" "$tmp/me.declared"
+    comm -12 "$tmp/me.declared" "$p.declared"
+  } | sort -u | comm -23 - "$tmp/both" > "$tmp/declared"
+  { comm -23 "$tmp/me.changed" "$tmp/both" > "$tmp/mine-only"
+    comm -23 "$p.changed" "$tmp/both" > "$tmp/theirs-only"
+    symbol_uses "$root" "$tmp/mine-only" "$p.symbols" " (changed by $name)"
+    [ -n "$wt" ] && symbol_uses "$wt" "$tmp/theirs-only" "$tmp/me.symbols" " in $name (changed here)"
+  } > "$tmp/uses"
+  merge="-"
+  if [ -s "$tmp/both" ] && [ -n "$theirs" ]; then
+    conflicts=$(merge_conflicts "$root" HEAD "$theirs")
+    rc=$?
+    if [ "$rc" -eq 2 ]; then merge="n/a (git < 2.38)"
+    elif [ -n "$conflicts" ]; then merge="textual conflict in $(printf '%s\n' "$conflicts" | csv)"
+    else merge="clean (committed state)"
+    fi
+  fi
+  [ -s "$tmp/both" ] || [ -s "$tmp/declared" ] || [ -s "$tmp/uses" ] || return 0
+  both=$(csv < "$tmp/both")
+  declared=$(csv < "$tmp/declared")
+  uses=$(paste -sd';' - < "$tmp/uses" | sed 's/;/; /g')
+  sig=$(printf '%s\n%s\n%s\n%s\n' "$both" "$declared" "$uses" "$merge" | cksum | awk '{ print $1 }')
+  printf "%s$US%s$US%s$US%s$US%s$US%s$US%s$US%s\n" "$name" "$label" "$wt" "$sig" "$both" "$declared" "$uses" "$merge" \
+    >> "$tmp/report"
+}
 
-  files=$(comm -12 "$tmp/me.changed" "$tmp/them.changed" | join_list 8)
-  declared=$( {
-      comm -12 "$tmp/me.changed" "$tmp/them.declared"
-      comm -12 "$tmp/them.changed" "$tmp/me.declared"
-      comm -12 "$tmp/me.declared" "$tmp/them.declared"
-    } | sort -u | join_list 8)
+# worktree_state <worktree> <branch> — what, when it changes, makes a cached result stale.
+worktree_state() {
+  local rec
+  git -C "$1" rev-parse HEAD 2>/dev/null
+  git -C "$1" status --porcelain 2>/dev/null
+  rec=$(task_records "$1" "$2" | head -n 1)
+  [ -n "$rec" ] && cksum < "$1/$rec"
+  return 0
+}
 
-  printf '\n%s  (%s)\n' "${branch:-<detached>}" "$wt"
-  if [ -n "$rec" ]; then
-    printf '  record:   %s\n' "$rec"
-    for f in Goal Now Affects; do
-      v=$(record_field "$wt/$rec" "$f")
-      [ -n "$v" ] && printf '  %-9s %s\n' "$(printf '%s' "$f" | tr 'A-Z' 'a-z'):" "$v"
+state_key() {
+  {
+    printf '%s\n' "$base"
+    git -C "$root" rev-parse -q --verify "$base^{commit}" 2>/dev/null
+    worktree_state "$root" "$me_branch"
+    other_worktrees "$root" | while IFS="$TAB" read -r path branch; do
+      [ -d "$path" ] || continue
+      printf '%s %s\n' "$path" "$branch"
+      worktree_state "$path" "$branch"
     done
-  else
-    printf '  record:   none — footprint is only what it changed (%d files)\n' \
-      "$(grep -c . "$tmp/them.changed" || true)"
-  fi
-  if [ -n "$files$declared" ]; then
-    n_overlap=$((n_overlap + 1))
-    [ -n "$files" ] && printf '  files:    %s\n' "$files"
-    [ -n "$declared" ] && printf '  declared: %s\n' "$declared"
-  else
-    printf '  overlap:  none\n'
-  fi
-done < "$tmp/others"
+  } | cksum | awk '{ print $1 }'
+}
 
-if [ "$n_other" -eq 0 ]; then
-  printf 'No other worktrees.\n'
-else
-  printf '\n%d other worktree(s); potential overlap with %d. Assess per .agent/contexts/tools/concurrent-work.md.\n' \
-    "$n_other" "$n_overlap"
-fi
+# detect — refresh $state/report, $state/footprints and $state/others unless nothing moved.
+detect() {
+  local key name label wt branch theirs mb n
+  key=$(state_key)
+  if [ -f "$state/key" ] && [ "$(cat "$state/key")" = "$key" ] && [ -f "$state/report" ]; then
+    return 0
+  fi
+  : > "$tmp/report"; : > "$tmp/footprints"; : > "$tmp/others"
+  footprint "$root" "$me_branch" "$tmp/me"
+  other_worktrees "$root" > "$tmp/worktrees"
+  while IFS="$TAB" read -r wt branch; do
+    [ -n "$wt" ] && [ -d "$wt" ] || continue
+    name=${branch:-$(basename "$wt")}
+    footprint "$wt" "$branch" "$tmp/them"
+    label=""
+    [ -s "$tmp/them.record" ] && label=$(record_field "$wt/$(cat "$tmp/them.record")" Goal)
+    theirs=$(git -C "$wt" rev-parse HEAD 2>/dev/null)
+    printf '%s\t%s\n' "$name" "$wt" >> "$tmp/others"
+    cat "$tmp/them.changed" "$tmp/them.declared" | sort -u |
+      awk -v n="$name" '{ print n "\t" $0 }' >> "$tmp/footprints"
+    compare "$name" "$label" "$wt" "$theirs" "$tmp/them"
+  done < "$tmp/worktrees"
+  if [ -n "$base" ] && mb=$(git -C "$root" merge-base HEAD "$base" 2>/dev/null) &&
+     [ "$mb" != "$(git -C "$root" rev-parse "$base^{commit}" 2>/dev/null)" ]; then
+    n=$(git -C "$root" rev-list --count "$mb..$base" 2>/dev/null)
+    base_footprint "$tmp/base"
+    compare main "$base has $n new commit(s) since this branch left it" "" "$(git -C "$root" rev-parse "$base^{commit}")" "$tmp/base"
+  fi
+  cp "$tmp/report" "$state/report"
+  cp "$tmp/footprints" "$state/footprints"
+  cp "$tmp/others" "$state/others"
+  printf '%s\n' "$key" > "$state/key"
+}
+
+# is_ignored <name> <both> <declared> <uses> <merge> — true when an ignore for <name> covers every
+# file, every symbol use and (if any) the textual conflict of this collision. Ignores are stored as
+# "<name>\t<files,…>\t<uses;…>\t<conflict 0|1>" in $state/ignored.
+is_ignored() {
+  [ -f "$state/ignored" ] || return 1
+  awk -F "$TAB" -v n="$1" -v both="$2" -v decl="$3" -v uses="$4" -v merge="$5" '
+    function split_set(str, sep, arr,   k, m, a) {
+      m = split(str, a, sep)
+      for (k = 1; k <= m; k++) { gsub(/^ +| +$/, "", a[k]); if (a[k] != "") arr[a[k]] = 1 }
+    }
+    $1 == n { found = 1; split_set($2, ",", okp); split_set($3, ";", oku); okc = ($4 == "1") }
+    END {
+      if (!found) exit 1
+      split_set(both "," decl, ",", need)
+      for (x in need) if (!(x in okp)) exit 1
+      split_set(uses, ";", needu)
+      for (x in needu) if (!(x in oku)) exit 1
+      if (merge ~ /^textual conflict/ && !okc) exit 1
+      exit 0
+    }' "$state/ignored"
+}
+
+# report_line <name> — the cached TSV line for one collision, or nothing.
+report_line() {
+  awk -F "$US" -v n="$1" '$1 == n { print; exit }' "$state/report"
+}
+
+# --- commands -------------------------------------------------------------------------------------
+
+brief() {
+  detect
+  while IFS="$US" read -r name label wt sig both declared uses merge; do
+    [ -n "$name" ] || continue
+    is_ignored "$name" "$both" "$declared" "$uses" "$merge" && continue
+    line="Possible collision with $name${label:+ ($label)}:"
+    [ -n "$both" ] && line="$line both change $both;"
+    [ -n "$declared" ] && line="$line declared overlap $declared;"
+    [ -n "$uses" ] && line="$line $uses;"
+    [ "$merge" != "-" ] && line="$line merge: $merge;"
+    printf '%s\n' "${line%;}."
+  done < "$state/report"
+}
+
+full_report() {
+  local n_open=0 n_ignored=0
+  if [ "$fetch" -eq 1 ] && [ -n "$base" ]; then
+    case "$base" in
+      */*) git -C "$root" fetch --quiet "${base%%/*}" "${base#*/}" >/dev/null 2>&1 || true ;;
+    esac
+  fi
+  detect
+  [ -f "$tmp/me.changed" ] || footprint "$root" "$me_branch" "$tmp/me"
+  printf 'worktree-overlap: %s · base %s · %d changed, %d declared\n' "${me_branch:-<detached>}" \
+    "${base:-<none>}" "$(grep -c . "$tmp/me.changed" || true)" "$(grep -c . "$tmp/me.declared" || true)"
+  while IFS="$US" read -r name label wt sig both declared uses merge; do
+    [ -n "$name" ] || continue
+    if is_ignored "$name" "$both" "$declared" "$uses" "$merge"; then n_ignored=$((n_ignored + 1)); continue; fi
+    [ "$n_open" -eq 0 ] && printf '\nPossible collisions\n'
+    n_open=$((n_open + 1))
+    printf '  %s%s%s\n' "$name" "${label:+ — $label}" "${wt:+  ($wt)}"
+    [ -n "$both" ] && printf '    both change  %s\n' "$both"
+    [ -n "$declared" ] && printf '    declared     %s\n' "$declared"
+    [ -n "$uses" ] && printf '%s\n' "$uses" | tr ';' '\n' | sed 's/^ *//; s/^/    uses         /'
+    [ "$merge" != "-" ] && printf '    merge        %s\n' "$merge"
+  done < "$state/report"
+  if [ "$n_ignored" -gt 0 ]; then
+    printf '\nIgnored by the user (not grown since): %s\n' \
+      "$(while IFS="$US" read -r name label wt sig both declared uses merge; do
+           is_ignored "$name" "$both" "$declared" "$uses" "$merge" && printf '%s\n' "$name"
+         done < "$state/report" | csv)"
+  fi
+  clear=$(cut -f1 "$state/others" | while IFS= read -r o; do
+    [ -n "$(report_line "$o")" ] || printf '%s\n' "$o"; done | csv)
+  [ -n "$clear" ] && printf '\nNo collision: %s\n' "$clear"
+  [ -s "$state/others" ] || printf '\nNo other worktrees.\n'
+  if [ "$n_open" -gt 0 ]; then
+    printf '\nThe user decides each (concurrent-work.md): ignore · quick look · full investigation.\n'
+  fi
+}
+
+ignore() {
+  detect
+  local line both declared uses merge conflict old_paths old_uses old_conflict paths all_uses
+  line=$(report_line "$subject")
+  if [ -z "$line" ] && [ -z "$paths_given" ]; then
+    printf 'No collision with %s right now — nothing to ignore.\n' "$subject"
+    return 0
+  fi
+  both=$(printf '%s\n' "$line" | cut -d "$US" -f5)
+  declared=$(printf '%s\n' "$line" | cut -d "$US" -f6)
+  uses=$(printf '%s\n' "$line" | cut -d "$US" -f7)
+  merge=$(printf '%s\n' "$line" | cut -d "$US" -f8)
+  conflict=0
+  case "$merge" in "textual conflict"*) conflict=1 ;; esac
+  old_paths=""; old_uses=""; old_conflict=0
+  if [ -f "$state/ignored" ]; then
+    old_paths=$(awk -F "$TAB" -v n="$subject" '$1 == n { print $2 }' "$state/ignored")
+    old_uses=$(awk -F "$TAB" -v n="$subject" '$1 == n { print $3 }' "$state/ignored")
+    old_conflict=$(awk -F "$TAB" -v n="$subject" '$1 == n { print $4 }' "$state/ignored")
+  fi
+  [ "${old_conflict:-0}" = 1 ] && conflict=1
+  paths=$(printf '%s,%s,%s,%s\n' "$old_paths" "$both" "$declared" "$(printf '%s' "$paths_given" | paste -sd, -)" |
+    tr ',' '\n' | sed 's/^ *//; s/ *$//; /^$/d' | sort -u | paste -sd, -)
+  all_uses=$(printf '%s;%s\n' "$old_uses" "$uses" | tr ';' '\n' | sed 's/^ *//; s/ *$//; /^$/d' | sort -u | paste -sd';' -)
+  { [ -f "$state/ignored" ] && awk -F "$TAB" -v n="$subject" '$1 != n' "$state/ignored"
+    printf '%s\t%s\t%s\t%s\n' "$subject" "$paths" "$all_uses" "$conflict"
+  } > "$tmp/ignored"
+  cp "$tmp/ignored" "$state/ignored"
+  printf 'Ignoring the collision with %s as it is now (%s); it comes back if it grows.\n' "$subject" \
+    "$(printf '%s' "$paths" | sed 's/,/, /g')"
+}
+
+# subject_worktree — prints "<worktree>\t<commit>" for the subject ("main" → base, no worktree).
+subject_worktree() {
+  if [ "$subject" = main ]; then
+    printf "$US%s\n" "$(git -C "$root" rev-parse "$base^{commit}" 2>/dev/null)"
+    return 0
+  fi
+  local wt
+  wt=$(awk -F "$TAB" -v n="$subject" '$1 == n { print $2; exit }' "$state/others")
+  [ -n "$wt" ] || return 1
+  printf "%s$US%s\n" "$wt" "$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
+}
+
+collision_file() {
+  printf '%s/.tmp/collision-%s-%s.md\n' "$root" "$(branch_slug "${me_branch:-detached}")" "$(branch_slug "$subject")"
+}
+
+quick() {
+  detect
+  local line wt theirs out mb_me mb_them rec f n=0
+  line=$(report_line "$subject")
+  [ -n "$line" ] || { printf 'No collision with %s right now.\n' "$subject"; return 0; }
+  IFS="$US" read -r wt theirs <<EOF
+$(subject_worktree)
+EOF
+  out=$(collision_file)
+  mb_me=$(git -C "$root" merge-base HEAD "${theirs:-HEAD}" 2>/dev/null)
+  {
+    printf '# Quick look — %s vs %s\n\n' "${me_branch:-<detached>}" "$subject"
+    printf '%s\n' "$line" | awk -F "$US" '{
+      if ($2 != "") print "Their goal: " $2
+      if ($5 != "") print "Both change: " $5
+      if ($6 != "") print "Declared overlap: " $6
+      if ($7 != "") print "Uses: " $7
+      if ($8 != "-") print "Merge: " $8 }'
+    if [ -n "$wt" ]; then
+      rec=$(task_records "$wt" "$subject" | head -n 1)
+      if [ -n "$rec" ]; then
+        printf '\nTheir record (%s):\n' "$rec"
+        for f in Goal Affects Now Open; do
+          v=$(record_field "$wt/$rec" "$f"); [ -n "$v" ] && printf -- '- %s: %s\n' "$f" "$v"
+        done
+      fi
+    else
+      printf '\nCommits on %s since this branch left it:\n' "$base"
+      git -C "$root" log --oneline "$mb_me..$theirs" 2>/dev/null | head -n 30 | sed 's/^/- /'
+    fi
+    printf '%s\n' "$line" | cut -d "$US" -f5,6 | tr "$US" ',' | tr ',' '\n' | sed 's/^ *//; /^$/d' | sort -u > "$tmp/paths"
+    while IFS= read -r f; do
+      n=$((n + 1))
+      printf '\n## %s\n\nHere (since the merge base, including uncommitted):\n\n```diff\n' "$f"
+      git -C "$root" diff --no-color "$mb_me" -- "$f" 2>/dev/null | head -n 150
+      printf '```\n\nThere:\n\n```diff\n'
+      if [ -n "$wt" ]; then
+        mb_them=$(git -C "$wt" merge-base HEAD "$mb_me" 2>/dev/null || printf '%s' "$mb_me")
+        git -C "$wt" diff --no-color "$mb_them" -- "$f" 2>/dev/null | head -n 150
+      else
+        git -C "$root" diff --no-color "$mb_me" "$theirs" -- "$f" 2>/dev/null | head -n 150
+      fi
+      printf '```\n'
+    done < "$tmp/paths"
+  } > "$out"
+  printf 'Quick look written to %s (%d overlapping files). Judge it: disjoint, or likely conflict.\n' \
+    "${out#"$root"/}" "$n"
+}
+
+full() {
+  detect
+  local wt theirs out tmpwt verdict rc rc_alone conflicts dirty_me dirty_them
+  IFS="$US" read -r wt theirs <<EOF
+$(subject_worktree || printf '%s\n' "$US")
+EOF
+  [ -n "$theirs" ] || { echo "worktree-overlap: no worktree or commit for '$subject'" >&2; exit 2; }
+  out=$(collision_file)
+  tmpwt="$tmp/merge"
+  git -C "$root" worktree add --quiet --detach "$tmpwt" HEAD >/dev/null 2>&1 ||
+    { echo "worktree-overlap: could not create a throwaway worktree" >&2; exit 2; }
+  dirty_me=$(git -C "$root" status --porcelain | grep -c .)
+  dirty_them=0
+  [ -n "$wt" ] && dirty_them=$(git -C "$wt" status --porcelain | grep -c .)
+  {
+    printf '# Full investigation — %s vs %s\n\n' "${me_branch:-<detached>}" "$subject"
+    printf 'Committed state only: %s uncommitted files here, %s there are not part of this merge.\n\n' \
+      "$dirty_me" "$dirty_them"
+  } > "$out"
+  if ! git -C "$tmpwt" -c user.name=worktree-overlap -c user.email=worktree-overlap@invalid \
+       merge --no-edit --no-ff --quiet "$theirs" >> "$tmp/merge.log" 2>&1; then
+    conflicts=$(git -C "$tmpwt" diff --name-only --diff-filter=U | csv)
+    git -C "$tmpwt" merge --abort >/dev/null 2>&1 || true
+    verdict="confirmed: textual conflict in $conflicts"
+  elif [ -z "$test_cmd" ]; then
+    verdict="merges cleanly; no test command given, so behaviour is unchecked"
+  else
+    (cd "$tmpwt" && bash -c "$test_cmd") > "$tmp/combined.log" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      verdict="no collision found: merges cleanly and the tests pass on the combination"
+    else
+      git -C "$tmpwt" checkout --quiet --detach HEAD^1 >/dev/null 2>&1
+      (cd "$tmpwt" && bash -c "$test_cmd") > "$tmp/alone.log" 2>&1
+      rc_alone=$?
+      if [ "$rc_alone" -eq 0 ]; then
+        verdict="confirmed: the tests pass here alone but fail on the combination"
+      else
+        verdict="inconclusive: the tests already fail here without the merge"
+      fi
+    fi
+  fi
+  {
+    printf 'Verdict: %s\n' "$verdict"
+    [ -n "$test_cmd" ] && printf '\nTest command: `%s`\n' "$test_cmd"
+    if [ -s "$tmp/combined.log" ]; then
+      printf '\n## Tests on the combination (last 150 lines)\n\n```\n'; tail -n 150 "$tmp/combined.log"; printf '```\n'
+    fi
+    if [ -s "$tmp/alone.log" ]; then
+      printf '\n## Tests here alone (last 150 lines)\n\n```\n'; tail -n 150 "$tmp/alone.log"; printf '```\n'
+    fi
+  } >> "$out"
+  git -C "$root" worktree remove --force "$tmpwt" >/dev/null 2>&1 || true
+  git -C "$root" worktree prune >/dev/null 2>&1 || true
+  printf '%s — details in %s\n' "$verdict" "${out#"$root"/}"
+}
+
+case "$cmd" in
+  detect) full_report ;;
+  brief)  brief ;;
+  ignore) ignore ;;
+  quick)  quick ;;
+  full)   full ;;
+esac
 exit 0

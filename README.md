@@ -1,4 +1,4 @@
-# Human-in-the-loop
+# Human-in-the-loop agentic setup
 
 A portable operating layer for coding agents, for monorepos and single repos. The agent is treated
 as a capable contractor with two built-in weaknesses: it forgets everything between sessions, and it
@@ -24,19 +24,20 @@ its reason.
 | **Settling on the first option that works.** | ADR steps rank criteria before trying options and keep *dead / chosen / viable-not-chosen* with `revisit if`; the agent asks before freezing a step at landing. |
 | **Review churn on stacked PRs.** | An open layer never gets another commit: review fixes arrive as a new layer on top, so the stack is never rebased, and it merges as a whole, top-down, without conflicts. |
 | **Grading its own homework.** | Self-review by a fresh-context reviewer that never saw the implementation, writing a fix-ready handoff. |
-| **Parallel agents colliding.** | Each task declares an `Affects:` footprint; `worktree-overlap` compares it with every other worktree's changes and footprint. |
+| **Parallel agents colliding.** | Detection is mechanical and quiet: files changed on both sides, declared `Affects:` footprints, uses of symbols the other side changed, textual merge conflicts, and main moving underneath. A possible collision reaches the conversation as one line; an edit into another task's footprint is stopped until the user decides — ignore, a quick look, or a full investigation that merges both and runs the tests on the combination. |
 | **Conflicting sources of truth.** | A protocol that dates code, comments, ADRs and callers, classifies the divergence, and recommends based on what dependents actually rely on. |
 
 ## Repository layout
 
 ```
-install.sh                    installer: ./install.sh <monorepo|single-repo> <target> [--with-codex]
+install.sh                    installer: ./install.sh <monorepo|single-repo> <target> [--with-codex] [--migrate]
 core/                         everything shared by both shapes (copied into the target as-is)
 variants/
   monorepo/                   .agent/repo.md (repo profile) + .claude/settings.json (autonomy profile)
   single-repo/                the same two files for a single-package repo
 adapters/codex/               optional Codex hook wiring
 tests/run.sh                  end-to-end tests: installs both shapes into scratch repos
+LICENSE                       MIT
 ```
 
 The two shapes differ only where the repo shape matters, and all of it is in **`.agent/repo.md`, the
@@ -57,9 +58,10 @@ docs/adr/                     topic docs (composed record) + history/ (decision 
   contexts/                   the knowledge base: index.md → dev/, tools/, <your areas>/
     tools/                    the protocols (task records, landing, decisions, conflicts, …)
   agents/self-reviewer.md     agent-agnostic reviewer brief
-  hooks/context-first.sh      session-start context, text or Claude-hook JSON
+  hooks/context-first.sh      session-start context, text or Claude-hook JSON; prints only on change
+  hooks/edit-guard.sh         stops an edit into another task's footprint until the user decides
   bin/check-contexts          context drift report, relevant vs unrelated to the change
-  bin/worktree-overlap        footprint overlap with tasks in other worktrees
+  bin/worktree-overlap        collision detection, ignore, quick look, full investigation
   lib/common.sh               shared shell helpers
 .claude/
   settings.json               autonomy profile + hook wiring (see below)
@@ -164,9 +166,11 @@ All are bash + git + POSIX awk/sed, written for bash 3.2 (macOS) and Git Bash; n
 
 | Script | What it does |
 | --- | --- |
-| `.agent/hooks/context-first.sh [--format text\|json]` | Lists the context areas, the current branch's task record or Draft ADR step (with its `Now:`), and tasks in other worktrees. Never fails a prompt. |
+| `.agent/hooks/context-first.sh [--format text\|json] [--dedupe]` | Lists the context areas, the current branch's task record or Draft ADR step (with its `Now:`), and undecided collisions with other tasks. With `--dedupe` it prints only when something changed in this session (always after compaction). Never fails a prompt. |
+| `.agent/hooks/edit-guard.sh` | Pre-edit hook: denies an edit to a file inside another task's footprint until the user has decided on that collision. Reads only the cached detection; allows anything it can't read. |
 | `.agent/bin/check-contexts [--base <ref>]` | Verifies every context reference and `Covers:` glob; reports `DRIFT` (with the new line), `MISSING`, `GONE`, `BROKEN`, `UNANCHORED`, `EMPTY-COVER`; splits docs into relevant-to-this-change and unrelated. Exit 1 on findings. |
-| `.agent/bin/worktree-overlap [--base <ref>]` | For every other worktree: its record's Goal/Now/Affects, files changed in both, and files inside either declared footprint. |
+| `.agent/bin/worktree-overlap [--base <ref>]` | Detects possible collisions with every other worktree and with main: both change, declared, symbol uses, merge conflicts. `--brief` prints one line per undecided collision (cached). |
+| `.agent/bin/worktree-overlap ignore\|quick\|full <branch\|main>` | The user's three choices: record an ignore (quiet until the overlap grows); write a quick look (their goal + overlapping changes) to `.tmp/`; merge both in a throwaway worktree and run `--test "<command>"` on the combination. |
 
 The base ref is `$AGENT_BASE`, else `origin/HEAD`, else `main`/`master`.
 

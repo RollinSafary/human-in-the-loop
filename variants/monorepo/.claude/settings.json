@@ -125,7 +125,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/context-first.sh\" --format json --event UserPromptSubmit",
+            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/context-first.sh\" --format json --event UserPromptSubmit --dedupe",
             "statusMessage": "Looking for a relevant saved context…"
           }
         ]
@@ -137,8 +137,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/context-first.sh\" --format json --event SessionStart --source compact",
+            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/context-first.sh\" --format json --event SessionStart --source compact --dedupe",
             "statusMessage": "Restoring task record after compaction…"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.agent/hooks/edit-guard.sh\""
           }
         ]
       }

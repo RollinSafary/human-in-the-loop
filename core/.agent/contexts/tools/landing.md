@@ -28,9 +28,9 @@ implementer disagrees with goes to the user as a decision request, not silently 
 
 ## 3. Concurrent-work re-check
 
-Run `.agent/bin/worktree-overlap`. Any new overlap since the task started is assessed per
-[concurrent-work.md](concurrent-work.md); a confirmed conflict is a decision request before anything
-is pushed.
+Run `.agent/bin/worktree-overlap` (it fetches the base first). Any possible collision the user has
+not decided on goes to them per [concurrent-work.md](concurrent-work.md) — ignore, quick look, or
+full investigation — before anything is pushed. A confirmed collision is a decision request.
 
 ## 4. Contexts and known issues — applied, then reported
 

@@ -156,3 +156,91 @@ join_list() {
     END { if (n > max) out = out ", +" (n - max) " more"; print out }
   '
 }
+
+# symbols_from_diff — reads a unified diff on stdin; prints the identifiers it declares or encloses,
+# sorted and unique. A language-agnostic heuristic: a changed line, or a hunk header's enclosing
+# context, that starts (after modifiers such as export/pub/static) with a declaration keyword. Local
+# const/let/var count only when unindented or exported. Names shorter than 4 characters are dropped.
+symbols_from_diff() {
+  awk '
+    function scan(line,   t, indented, exported, name) {
+      indented = (line ~ /^[ \t]/)
+      t = line
+      sub(/^[ \t]+/, "", t)
+      exported = 0
+      while (match(t, /^(export|default|declare|abstract|async|pub|public|private|protected|static|final|override|internal|open)[ \t]+/)) {
+        if (substr(t, 1, 6) == "export" || substr(t, 1, 3) == "pub") exported = 1
+        t = substr(t, RLENGTH + 1)
+      }
+      name = ""
+      if (match(t, /^(function|class|interface|type|enum|namespace|module|struct|trait|def|func|fn)\*?[ \t]+\*?[A-Za-z_$][A-Za-z0-9_$]*/)) {
+        name = substr(t, RSTART, RLENGTH)
+      } else if ((!indented || exported) && match(t, /^(const|let|var)[ \t]+[A-Za-z_$][A-Za-z0-9_$]*/)) {
+        name = substr(t, RSTART, RLENGTH)
+      }
+      if (name == "") return
+      sub(/^[a-z]+\*?[ \t]+\*?/, "", name)
+      if (length(name) >= 4) print name
+    }
+    /^@@/ { i = index(substr($0, 3), "@@"); if (i > 0) scan(substr($0, i + 5)); next }
+    /^(\+\+\+|---)( |$)/ { next }
+    /^[+-]/ { scan(substr($0, 2)) }
+  ' | sort -u
+}
+
+# changed_symbols <root> <base> — symbols_from_diff over everything this worktree changed:
+# committed since the merge base with <base>, and uncommitted.
+changed_symbols() {
+  local root=$1 base=$2
+  {
+    if [ -n "$base" ]; then
+      git -C "$root" diff -U0 --no-color "$base...HEAD" -- 2>/dev/null
+    fi
+    git -C "$root" diff -U0 --no-color HEAD -- 2>/dev/null
+  } | symbols_from_diff
+}
+
+# symbol_uses <root> <files-list> <symbols-list> [<suffix>] — "<file> uses `<symbol>`<suffix>" for
+# every listed file (that exists in <root>) mentioning one of the symbols as a whole word.
+symbol_uses() {
+  local root=$1 files=$2 syms=$3 suffix=${4:-} f s
+  [ -s "$syms" ] && [ -s "$files" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$root/$f" ] || continue
+    grep -owF -f "$syms" "$root/$f" 2>/dev/null | sort -u | while IFS= read -r s; do
+      printf '%s uses `%s`%s\n' "$f" "$s" "$suffix"
+    done
+  done < "$files"
+}
+
+# merge_conflicts <root> <ours> <theirs> — files that would conflict textually if the two commits
+# merged, via `git merge-tree --write-tree` (no worktree touched). Returns 2 when this git is older
+# than 2.38 and cannot tell.
+merge_conflicts() {
+  local out rc
+  out=$(git -C "$1" merge-tree --write-tree --name-only --no-messages "$2" "$3" 2>/dev/null)
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) printf '%s\n' "$out" | sed 1d | sed '/^$/d' | sort -u; return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+# read_hook_payload — the JSON a hook receives on stdin, without ever blocking: an interactive
+# terminal or a silent pipe yields nothing.
+read_hook_payload() {
+  local line payload=""
+  [ -t 0 ] && return 0
+  while IFS= read -r -t 1 line || [ -n "$line" ]; do
+    payload="$payload$line"
+    line=""
+  done
+  printf '%s' "$payload"
+}
+
+# json_field <json> <key> — the string value of a top-level-looking "key": "value" pair; enough for
+# hook payloads (session_id, file_path), not a JSON parser.
+json_field() {
+  printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
+}

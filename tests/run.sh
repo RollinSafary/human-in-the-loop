@@ -160,7 +160,7 @@ EOF
   has "a relevant doc with clean refs still asks for a content read" "$out" "content still needs a read"
   git -C "$repo" checkout -q -- src/render/Clock.ts
 
-  # --- worktree-overlap -------------------------------------------------------------------------
+  # --- collisions --------------------------------------------------------------------------------
   wt="$work/$shape-wt"
   git_quiet -C "$repo" worktree add -b feat/version-bump "$wt" main
   mkdir -p "$wt/.tmp"
@@ -169,22 +169,126 @@ EOF
   printf 'export const VERSION = 2;\n' > "$wt/src/version.ts"
   printf 'export const VERSION = 3;\n' > "$repo/src/version.ts"
 
-  out=$(cd "$repo" && .agent/bin/worktree-overlap)
-  has "other worktree is listed with its record" "$out" "feat/version-bump"
-  has "its goal is shown" "$out" "goal:     bump version"
-  has "a file changed in both is a file overlap" "$out" "files:    src/version.ts"
-  has "my declared footprint vs their declared footprint is reported" "$out" "declared: src/render/Clock.ts"
-  has "summary counts the overlap" "$out" "potential overlap with 1"
+  out=$(cd "$repo" && .agent/bin/worktree-overlap --no-fetch)
+  has "a collision names the other task and its goal" "$out" "feat/version-bump — bump version"
+  has "a file changed on both sides is reported" "$out" "both change  src/version.ts"
+  has "declared footprints that overlap are reported" "$out" "declared     src/render/Clock.ts"
+  has "the user's three choices are named" "$out" "ignore · quick look · full investigation"
+
+  brief=$(cd "$repo" && .agent/bin/worktree-overlap --brief)
+  has "--brief is one line per undecided collision" "$brief" "Possible collision with feat/version-bump (bump version): both change src/version.ts; declared overlap src/render/Clock.ts"
+  [ "$(printf '%s\n' "$brief" | grep -c .)" = 1 ] && ok "--brief prints exactly one line here" || bad "--brief prints exactly one line here" "$brief"
 
   out=$(cd "$repo" && .agent/hooks/context-first.sh --format text)
-  has "hook mentions other tasks in flight" "$out" "feat/version-bump (bump version)"
+  has "the session hook carries the collision line" "$out" "Possible collision with feat/version-bump"
+  has "and says the user decides" "$out" "the user decides each possible collision"
 
-  out=$(cd "$wt" && "$wt/.agent/bin/worktree-overlap" 2>&1)
-  has "the check runs from the other worktree and sees this task" "$out" "feat/clock-units"
+  # print only on change, per session
+  first=$(cd "$repo" && printf '{"session_id":"s-1"}' | .agent/hooks/context-first.sh --format text --dedupe)
+  second=$(cd "$repo" && printf '{"session_id":"s-1"}' | .agent/hooks/context-first.sh --format text --dedupe)
+  other=$(cd "$repo" && printf '{"session_id":"s-2"}' | .agent/hooks/context-first.sh --format text --dedupe)
+  compact=$(cd "$repo" && printf '{"session_id":"s-1"}' | .agent/hooks/context-first.sh --format text --dedupe --source compact)
+  has "--dedupe prints the first time in a session" "$first" "Saved contexts exist"
+  [ -z "$second" ] && ok "--dedupe stays silent when nothing changed" || bad "--dedupe stays silent when nothing changed" "$second"
+  has "--dedupe prints for another session" "$other" "Saved contexts exist"
+  has "--dedupe always prints after compaction" "$compact" "just compacted"
+  out=$(cd "$repo" && .agent/hooks/context-first.sh --format text --dedupe < /dev/null)
+  has "--dedupe without a session id always prints" "$out" "Saved contexts exist"
+
+  # the edit guard
+  guard() { (cd "$repo" && printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$1" | .agent/hooks/edit-guard.sh); }
+  out=$(guard "$repo/src/render/Clock.ts")
+  has "an edit inside another task's footprint is denied" "$out" '"permissionDecision":"deny"'
+  has "the denial names the task" "$out" "feat/version-bump"
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$out" | jq -e . >/dev/null 2>&1 && ok "the denial is valid JSON" || bad "the denial is valid JSON" "$out"
+  fi
+  [ -z "$(guard "$repo/README-nobody-touches.md")" ] && ok "an edit outside every footprint passes silently" ||
+    bad "an edit outside every footprint passes silently"
+
+  # ignore, and coming back when it grows
+  out=$(cd "$repo" && .agent/bin/worktree-overlap ignore feat/version-bump)
+  has "ignore records the user's choice" "$out" "Ignoring the collision with feat/version-bump"
+  [ -z "$(cd "$repo" && .agent/bin/worktree-overlap --brief)" ] && ok "an ignored collision is quiet" ||
+    bad "an ignored collision is quiet"
+  [ -z "$(guard "$repo/src/render/Clock.ts")" ] && ok "the edit guard lets an ignored path through" ||
+    bad "the edit guard lets an ignored path through"
+  has "the full report lists it as ignored" "$(cd "$repo" && .agent/bin/worktree-overlap --no-fetch)" "Ignored by the user (not grown since): feat/version-bump"
+  printf 'x\n' > "$repo/src/shared.txt"; printf 'y\n' > "$wt/src/shared.txt"
+  has "a grown collision comes back" "$(cd "$repo" && .agent/bin/worktree-overlap --brief)" "src/shared.txt"
+  out=$(cd "$repo" && .agent/bin/worktree-overlap ignore feat/version-bump --path src/untouched.ts)
+  [ -z "$(guard "$repo/src/untouched.ts")" ] && ok "--path ignores a file before it is touched" || bad "--path ignores a file before it is touched"
+  rm -f "$repo/src/shared.txt" "$wt/src/shared.txt"
+
+  # quick look
+  out=$(cd "$repo" && .agent/bin/worktree-overlap quick feat/version-bump)
+  has "quick look names its file" "$out" ".tmp/collision-feat-clock-units-feat-version-bump.md"
+  look=$(cat "$repo/.tmp/collision-feat-clock-units-feat-version-bump.md" 2>/dev/null)
+  has "quick look carries their goal" "$look" "Their goal: bump version"
+  has "quick look shows both sides of an overlapping file" "$look" "## src/version.ts"
+  has "including their change" "$look" "+export const VERSION = 2;"
+
+  out=$(cd "$wt" && "$wt/.agent/bin/worktree-overlap" --no-fetch 2>&1)
+  has "detection runs from the other worktree and sees this task" "$out" "feat/clock-units"
 
   git -C "$repo" checkout -q -- src/version.ts
   git_quiet -C "$repo" worktree remove --force "$wt"
 done
+
+printf '\n== collisions in depth\n'
+commit() { git_quiet -C "$1" add -A; git_quiet -C "$1" commit -m "$2"; }
+deep="$work/deep"; new_repo "$deep"
+has_merge_tree=0
+git -C "$deep" merge-tree --write-tree HEAD HEAD >/dev/null 2>&1 && has_merge_tree=1
+"$here/install.sh" single-repo "$deep" >/dev/null 2>&1; commit "$deep" "setup"
+git_quiet -C "$deep" checkout -b feat/mine
+dwt="$work/deep-theirs"
+git_quiet -C "$deep" worktree add -b feat/theirs "$dwt" main
+
+# uses: they change an exported symbol; a file of mine uses it
+printf 'export function toSeconds(ms: number) {\n  return ms / 1000;\n}\n' > "$dwt/src/time.ts"; commit "$dwt" "time"
+printf 'import { toSeconds } from "./time";\nexport const t = toSeconds(5);\n' > "$deep/src/use.ts"
+out=$(cd "$deep" && .agent/bin/worktree-overlap --no-fetch)
+has "a file of mine using a symbol they changed is a collision" "$out" 'uses         src/use.ts uses `toSeconds` (changed by feat/theirs)'
+lacks "no shared file means no 'both change'" "$out" "both change"
+
+# textual merge conflict, committed on both sides
+printf 'export const VERSION = 2;\n' > "$dwt/src/version.ts"; commit "$dwt" "v2"
+printf 'export const VERSION = 3;\n' > "$deep/src/version.ts"; commit "$deep" "v3"
+out=$(cd "$deep" && .agent/bin/worktree-overlap --no-fetch)
+if [ "$has_merge_tree" -eq 1 ]; then
+  has "committed changes that conflict are a textual conflict" "$out" "merge        textual conflict in src/version.ts"
+else
+  has "without merge-tree (git < 2.38) the merge signal says so" "$out" "merge        n/a (git < 2.38)"
+fi
+out=$(cd "$deep" && .agent/bin/worktree-overlap full feat/theirs)
+has "full investigation confirms a textual conflict by merging" "$out" "confirmed: textual conflict in src/version.ts"
+[ "$(git -C "$deep" worktree list | grep -c .)" = 2 ] && ok "the throwaway worktree is removed" ||
+  bad "the throwaway worktree is removed" "$(git -C "$deep" worktree list)"
+
+# behavioural: merges cleanly, my check passes alone and fails on the combination
+git_quiet -C "$deep" reset --hard HEAD~1
+printf 'grep -q "VERSION = 1" src/version.ts\n' > "$deep/check.sh"; commit "$deep" "check"
+out=$(cd "$deep" && .agent/bin/worktree-overlap full feat/theirs --test "sh check.sh")
+has "a test that passes alone and fails combined is a confirmed behavioural collision" "$out" \
+  "confirmed: the tests pass here alone but fail on the combination"
+has "the details go to a file, not the conversation" "$out" "details in .tmp/collision-feat-mine-feat-theirs.md"
+out=$(cd "$deep" && .agent/bin/worktree-overlap full feat/theirs --test "true")
+has "a clean merge with passing tests finds no collision" "$out" "no collision found"
+out=$(cd "$deep" && .agent/bin/worktree-overlap full feat/theirs --test "false")
+has "tests failing without the merge are inconclusive" "$out" "inconclusive"
+
+# main moved under this branch
+git_quiet -C "$deep" worktree remove --force "$dwt"
+git_quiet -C "$deep" checkout -q main
+printf 'export const t = 0;\n' > "$deep/src/use.ts"; commit "$deep" "main touches use.ts"
+git_quiet -C "$deep" checkout -q feat/mine
+printf 'export const t = 1;\n' > "$deep/src/use.ts"
+out=$(cd "$deep" && .agent/bin/worktree-overlap --no-fetch)
+has "main moving under a changed file is a collision" "$out" "main — main has 1 new commit(s) since this branch left it"
+has "with the file named" "$out" "both change  src/use.ts"
+out=$(cd "$deep" && .agent/bin/worktree-overlap quick main)
+has "a quick look at main lists its new commits" "$(cat "$deep/.tmp/collision-feat-mine-main.md")" "main touches use.ts"
 
 printf '\n== installer arguments\n'
 out=$("$here/install.sh" nonsense "$work" 2>&1; echo "exit=$?")

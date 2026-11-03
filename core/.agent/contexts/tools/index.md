@@ -34,8 +34,9 @@ code; every repo-specific path or command they mention resolves through
   decision-request format, and behaviour when nobody answers.
 - [evidence-conflicts.md](evidence-conflicts.md) — historical / structural / operational truth,
   dated investigation, classification (defect, regression, evolution, drift, obsolete), reporting.
-- [concurrent-work.md](concurrent-work.md) — worktree footprints, `worktree-overlap`, file /
-  architectural / behavioural conflicts, potential vs confirmed.
+- [concurrent-work.md](concurrent-work.md) — automatic collision detection (both change, declared,
+  symbol uses, merge conflicts, main moved), then the user's choice: ignore, quick look, or full
+  investigation (merge + tests); keeping the context clean.
 - [bootstrap.md](bootstrap.md) — continuous vs bootstrap mode; building contexts on an existing
   codebase from evidence; reconstructed ADRs with provenance.
 - [context-updater.md](context-updater.md) — create / update / restructure, all applied at landing

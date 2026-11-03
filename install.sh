@@ -259,7 +259,7 @@ copy_tree "$here/core"
 copy_tree "$here/variants/$variant"
 [ "$with_codex" -eq 1 ] && copy_tree "$here/adapters/codex"
 
-chmod +x "$target/.agent/hooks/context-first.sh" "$target/.agent/bin/"* 2>/dev/null || true
+chmod +x "$target/.agent/hooks/"*.sh "$target/.agent/bin/"* 2>/dev/null || true
 
 marker='# >>> human-in-the-loop-agentic-setup'
 gitignore="$target/.gitignore"
@@ -367,8 +367,8 @@ if [ -n "$kept" ]; then
 fi
 if [ -f "$target/.claude/settings.json" ] &&
    ! grep -qF '.agent/hooks/context-first.sh' "$target/.claude/settings.json"; then
-  printf '\nYour .claude/settings.json was kept and does not wire .agent/hooks/context-first.sh —\n'
-  printf 'copy the "hooks" block from variants/%s/.claude/settings.json into it.\n' "$variant"
+  printf '\nYour .claude/settings.json was kept and does not wire the .agent/hooks/ scripts (session\n'
+  printf 'context, edit guard) — copy the "hooks" block from variants/%s/.claude/settings.json into it.\n' "$variant"
 fi
 
 cat <<EOF

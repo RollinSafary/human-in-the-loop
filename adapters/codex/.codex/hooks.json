@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.agent/hooks/context-first.sh\" --format text --event SessionStart",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.agent/hooks/context-first.sh\" --format text --event SessionStart --dedupe",
             "statusMessage": "Loading saved contexts…",
             "timeout": 15
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.agent/hooks/context-first.sh\" --format text",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.agent/hooks/context-first.sh\" --format text --dedupe",
             "statusMessage": "Looking for a relevant saved context…",
             "timeout": 15
           }

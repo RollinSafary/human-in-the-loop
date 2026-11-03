@@ -28,9 +28,10 @@ asking for every step.
    act and again after any compaction.
 2. If it names a task-progression record for this branch, read it **before anything else** and
    continue it rather than starting over.
-3. If it lists other worktrees with active tasks and this task will touch shared code, run
-   `.agent/bin/worktree-overlap` before editing
-   ([tools/concurrent-work.md](.agent/contexts/tools/concurrent-work.md)).
+3. If it reports a possible collision with another task, the user decides before work touching it
+   continues: ignore, quick look, or full investigation
+   ([tools/concurrent-work.md](.agent/contexts/tools/concurrent-work.md)). The same applies when an
+   edit is stopped by the edit guard.
 
 ## Saved contexts — load on demand
 
